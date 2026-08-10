@@ -1,0 +1,54 @@
+[package]
+name = "nexpass"
+version = "5.0.1"
+description = "NexPass — secure local credential vault"
+authors = ["Arabi Islam, MR. ARX <NexApp>"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+dotenvy = "0.15"
+
+[dependencies]
+tauri = { version = "2" }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Crypto layer — used by crypto.rs (key derivation + encrypt/decrypt)
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+
+# Google Sign-In (system browser + loopback redirect) + Firebase Auth REST calls.
+# rustls-tls (not the default native-tls) because native-tls needs OpenSSL
+# cross-compiled for the Android NDK target, which is a common source of
+# Android build failures; rustls is pure Rust and cross-compiles cleanly.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+urlencoding = "2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Tray icon + window vibrancy have no Android/iOS equivalent — only
+# pulled in (and only compiled) for desktop targets.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+window-vibrancy = "0.5"
+tauri = { version = "2", features = ["tray-icon"] }
+
+[lib]
+name = "nexpass_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "nexpass"
+path = "src/main.rs"
+
+# Release build tuning — smaller binary, faster startup.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

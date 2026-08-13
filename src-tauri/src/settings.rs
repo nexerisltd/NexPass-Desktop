@@ -9,14 +9,26 @@ pub struct AppSettings {
     pub notifications_enabled: bool,
     pub auto_lock_minutes: i64,
     #[serde(default)]
-    pub daily_sync_enabled: bool,
-    #[serde(default)]
-    pub daily_sync_time: String,
+    pub biometric_enabled: bool,
+    // "daily" | "weekly" | "monthly" — how often to auto-check for
+    // app updates. Defaults to weekly.
+    #[serde(default = "default_update_frequency")]
+    pub update_check_frequency: String,
+}
+
+fn default_update_frequency() -> String {
+    "weekly".to_string()
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        AppSettings { minimize_to_tray: true, notifications_enabled: true, auto_lock_minutes: 5, daily_sync_enabled: false, daily_sync_time: "09:00".to_string() }
+        AppSettings {
+            minimize_to_tray: true,
+            notifications_enabled: true,
+            auto_lock_minutes: 5,
+            biometric_enabled: false,
+            update_check_frequency: default_update_frequency(),
+        }
     }
 }
 

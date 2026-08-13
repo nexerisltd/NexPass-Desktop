@@ -24,8 +24,8 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-const FIREBASE_API_KEY: &str = env!("FIREBASE_API_KEY");
-const FIRESTORE_PROJECT_ID: &str = env!("FIRESTORE_PROJECT_ID");
+use crate::secrets::FIREBASE_API_KEY;
+const FIRESTORE_PROJECT_ID: &str = "nexpass-9bfe3";
 
 /// How many entries go into a single Firestore batch-write request.
 /// Firestore allows up to 500 writes/commit, but smaller batches keep
@@ -417,6 +417,8 @@ fn entry_to_fields(entry: &RawEntry) -> Value {
     insert_opt(&mut fields, "url_nonce", &entry.url_nonce);
     insert_opt(&mut fields, "notes_ct", &entry.notes_ct);
     insert_opt(&mut fields, "notes_nonce", &entry.notes_nonce);
+    insert_opt(&mut fields, "fields_ct", &entry.fields_ct);
+    insert_opt(&mut fields, "fields_nonce", &entry.fields_nonce);
     fields.insert(
         "created_at".into(),
         json!({"integerValue": entry.created_at.to_string()}),
@@ -426,6 +428,7 @@ fn entry_to_fields(entry: &RawEntry) -> Value {
         json!({"integerValue": entry.updated_at.to_string()}),
     );
     fields.insert("favorite".into(), json!({"booleanValue": entry.favorite}));
+    fields.insert("category".into(), json!({"stringValue": entry.category}));
     if let Some(deleted_at) = entry.deleted_at {
         fields.insert(
             "deleted_at".into(),
@@ -580,6 +583,9 @@ fn pull_entries(app: &AppHandle, id_token: &str, uid: &str) -> Result<usize, Str
             favorite: get_bool(&fields, "favorite").unwrap_or(false),
             deleted_at: get_int(&fields, "deleted_at"),
             synced_at: None, // ignored by apply_remote_entry; it sets its own
+            category: get_str(&fields, "category").unwrap_or_else(vault::default_category),
+            fields_ct: get_str(&fields, "fields_ct"),
+            fields_nonce: get_str(&fields, "fields_nonce"),
         };
 
         if vault::apply_remote_entry(app, &entry)? {

@@ -1,9 +1,13 @@
 // NexPass — Tauri backend library
+mod biometric_store;
 mod crypto;
 mod google_auth;
+mod profile_store;
+mod secrets;
 mod settings;
 mod storage;
 mod sync;
+mod updater;
 mod vault;
 
 use std::sync::Mutex;
@@ -11,7 +15,7 @@ use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 #[cfg(desktop)]
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 #[derive(Default)]
 struct SessionState {
@@ -21,9 +25,27 @@ type Session = Mutex<SessionState>;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(Session::default())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        // Gives the frontend a real "Restart App" action after an
+        // in-app update install (see updater.rs) instead of asking the
+        // user to find NexPass again in their app drawer.
+        .plugin(tauri_plugin_process::init())
+        // Real Tauri plugin (Kotlin @TauriPlugin) that installs a
+        // downloaded update APK — see tauri-plugin-nexpass-installer.
+        .plugin(tauri_plugin_nexpass_installer::init())
+        .manage(Session::default());
+
+    // Biometric prompt (fingerprint / face) — Android + iOS only, no
+    // desktop equivalent, so the plugin isn't even a dependency there.
+    #[cfg(mobile)]
+    {
+        builder = builder.plugin(tauri_plugin_biometric::init());
+    }
+
+    builder
         .setup(|app| {
             // Tray icons don't exist on Android/iOS — this whole block
             // (and the imports above) only compiles in on desktop.
@@ -70,15 +92,33 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
-                let s = settings::load_settings(app);
-                if s.minimize_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
-                    if let Some(session) = app.try_state::<Session>() {
-                        if let Ok(mut guard) = session.lock() {
-                            guard.key = None;
+
+                #[cfg(desktop)]
+                {
+                    let s = settings::load_settings(app);
+                    if s.minimize_to_tray {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        if let Some(session) = app.try_state::<Session>() {
+                            if let Ok(mut guard) = session.lock() {
+                                guard.key = None;
+                            }
                         }
+                        return;
                     }
+                }
+
+                // On Android, the hardware/gesture back button surfaces here
+                // when the WebView has no in-page history left to pop. Hand
+                // it to the frontend instead of letting the OS kill the
+                // activity outright, so it can step back a level inside the
+                // app, or show a "press back again to exit" prompt at the
+                // root and only actually quit (via the exit_app command)
+                // on a genuine second press.
+                #[cfg(mobile)]
+                {
+                    api.prevent_close();
+                    let _ = app.emit("back-requested", ());
                 }
             }
         })
@@ -110,7 +150,21 @@ pub fn run() {
             logout_and_wipe,
             delete_account,
             get_settings,
-            save_settings
+            save_settings,
+            exit_app,
+            set_biometric_pin,
+            get_biometric_pin,
+            clear_biometric_pin,
+            check_for_update,
+            fetch_release_notes,
+            download_update,
+            get_downloaded_update_info,
+            delete_downloaded_update,
+            install_update_apk,
+            get_profile,
+            save_profile,
+            set_profile_avatar,
+            clear_profile_avatar
         ])
         .run(tauri::generate_context!())
         .expect("error while running NexPass");
@@ -234,6 +288,8 @@ fn toggle_favorite(app: AppHandle, id: String) -> Result<bool, String> {
 struct GoogleSignInResult {
     email: String,
     local_id: String,
+    display_name: Option<String>,
+    photo_url: Option<String>,
 }
 
 #[tauri::command]
@@ -241,7 +297,12 @@ async fn google_sign_in(app: AppHandle) -> Result<GoogleSignInResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let session = google_auth::sign_in_with_google(&app)?;
         storage::save_google_session(&app, &session)?;
-        Ok(GoogleSignInResult { email: session.email, local_id: session.local_id })
+        Ok(GoogleSignInResult {
+            email: session.email,
+            local_id: session.local_id,
+            display_name: session.display_name,
+            photo_url: session.photo_url,
+        })
     })
     .await
     .map_err(|e| format!("sign-in task panicked: {e}"))?
@@ -250,7 +311,12 @@ async fn google_sign_in(app: AppHandle) -> Result<GoogleSignInResult, String> {
 #[tauri::command]
 fn google_session_status(app: AppHandle) -> Result<Option<GoogleSignInResult>, String> {
     let session = storage::load_google_session(&app)?;
-    Ok(session.map(|s| GoogleSignInResult { email: s.email, local_id: s.local_id }))
+    Ok(session.map(|s| GoogleSignInResult {
+        email: s.email,
+        local_id: s.local_id,
+        display_name: s.display_name,
+        photo_url: s.photo_url,
+    }))
 }
 
 /// Called right after a successful Google sign-in (when a local PIN/
@@ -406,6 +472,10 @@ struct ImportedEntry {
     password: String,
     url: String,
     notes: String,
+    #[serde(default = "vault::default_category")]
+    category: String,
+    #[serde(default)]
+    fields_json: Option<String>,
 }
 
 /// Imports entries from a file produced by export_vault.
@@ -425,7 +495,7 @@ fn import_vault(app: AppHandle, session: State<Session>, file_content: String, p
     let mut count = 0;
     for e in entries {
         vault::add_entry(&app, key, vault::EntryInput {
-            title: e.title, username: e.username, password: e.password, url: e.url, notes: e.notes,
+            title: e.title, username: e.username, password: e.password, url: e.url, notes: e.notes, category: e.category, fields_json: e.fields_json,
         })?;
         count += 1;
     }
@@ -456,4 +526,101 @@ fn get_settings(app: AppHandle) -> settings::AppSettings {
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: settings::AppSettings) -> Result<(), String> {
     settings::save_settings(&app, &settings)
+}
+
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+// See biometric_store.rs for the trust-model note on what this is (and
+// isn't) protecting. `pin` here is stored so a successful biometric
+// prompt can feed it straight into the existing unlock_with_pin flow
+// without the user re-typing it.
+#[tauri::command]
+fn set_biometric_pin(app: AppHandle, pin: String) -> Result<(), String> {
+    biometric_store::save_pin(&app, &pin)
+}
+
+#[tauri::command]
+fn get_biometric_pin(app: AppHandle) -> Option<String> {
+    biometric_store::load_pin(&app)
+}
+
+#[tauri::command]
+fn clear_biometric_pin(app: AppHandle) -> Result<(), String> {
+    biometric_store::clear_pin(&app)
+}
+
+#[tauri::command]
+fn check_for_update() -> Result<Option<updater::UpdateInfo>, String> {
+    updater::check_for_update()
+}
+
+#[tauri::command]
+fn fetch_release_notes() -> Result<Vec<updater::ReleaseNote>, String> {
+    updater::fetch_release_notes()
+}
+
+// async + spawn_blocking for the same reason sync_now/backup_to_cloud/etc.
+// are — a multi-megabyte APK download run as a plain sync command would
+// occupy one of the async-runtime's worker threads for the whole
+// download; spawn_blocking moves it to the dedicated blocking pool
+// instead so it can't starve other in-flight commands.
+#[tauri::command]
+async fn download_update(app: AppHandle, url: String, version: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || updater::download_update(&app, &url, &version))
+        .await
+        .map_err(|e| format!("download task panicked: {e}"))?
+}
+
+#[tauri::command]
+fn get_downloaded_update_info(app: AppHandle) -> Result<Option<updater::DownloadedUpdateInfo>, String> {
+    updater::get_downloaded_update_info(&app)
+}
+
+#[tauri::command]
+fn delete_downloaded_update(app: AppHandle) -> Result<bool, String> {
+    updater::delete_downloaded_update(&app)
+}
+
+// See the tauri-plugin-nexpass-installer crate — this goes through a real
+// Tauri mobile plugin (Kotlin @TauriPlugin + FileProvider) instead of
+// either the opener plugin (can't reach files in NexPass's own private
+// storage on Android) or raw JNI (Tauri never initializes the ndk-context
+// global in this Tauri version, so calling it directly crashes the app).
+#[tauri::command]
+fn install_update_apk(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_nexpass_installer::NexpassInstallerExt;
+    app.nexpass_installer()
+        .install_apk(tauri_plugin_nexpass_installer::InstallApkRequest { path })
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_profile(app: AppHandle) -> profile_store::Profile {
+    profile_store::load(&app)
+}
+
+#[tauri::command]
+fn save_profile(app: AppHandle, name: Option<String>, bio: Option<String>) -> Result<(), String> {
+    let mut p = profile_store::load(&app);
+    p.name = name;
+    p.bio = bio;
+    profile_store::save(&app, &p)
+}
+
+#[tauri::command]
+fn set_profile_avatar(app: AppHandle, path: String) -> Result<(), String> {
+    let mut p = profile_store::load(&app);
+    p.avatar_path = Some(path);
+    profile_store::save(&app, &p)
+}
+
+#[tauri::command]
+fn clear_profile_avatar(app: AppHandle) -> Result<(), String> {
+    let mut p = profile_store::load(&app);
+    p.avatar_path = None;
+    profile_store::save(&app, &p)
 }

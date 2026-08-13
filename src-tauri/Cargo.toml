@@ -1,17 +1,20 @@
 [package]
 name = "nexpass"
-version = "5.0.1"
+version = "6.0.1"
 description = "NexPass — secure local credential vault"
 authors = ["Arabi Islam, MR. ARX <NexApp>"]
 edition = "2021"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-dotenvy = "0.15"
 
 [dependencies]
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-process = "2"
+tauri-plugin-nexpass-installer = { path = "../tauri-plugin-nexpass-installer" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -36,6 +39,10 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 window-vibrancy = "0.5"
 tauri = { version = "2", features = ["tray-icon"] }
+
+# Biometric unlock (fingerprint / face) — Android + iOS only, no desktop equivalent.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-biometric = "2"
 
 [lib]
 name = "nexpass_lib"

@@ -17,9 +17,7 @@ use std::net::{TcpListener, TcpStream};
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 
-const GOOGLE_CLIENT_ID: &str = env!("GOOGLE_CLIENT_ID");
-const GOOGLE_CLIENT_SECRET: &str = env!("GOOGLE_CLIENT_SECRET");
-const FIREBASE_API_KEY: &str = env!("FIREBASE_API_KEY");
+use crate::secrets::{GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, FIREBASE_API_KEY};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FirebaseSession {
@@ -27,6 +25,10 @@ pub struct FirebaseSession {
     pub refresh_token: String,
     pub email: String,
     pub local_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub photo_url: Option<String>,
 }
 
 pub fn sign_in_with_google(app: &AppHandle) -> Result<FirebaseSession, String> {
@@ -123,6 +125,10 @@ struct FirebaseSignInResponse {
     refreshToken: String,
     email: String,
     localId: String,
+    #[serde(default)]
+    displayName: Option<String>,
+    #[serde(default)]
+    photoUrl: Option<String>,
 }
 
 fn exchange_id_token_for_firebase_session(
@@ -161,5 +167,7 @@ fn exchange_id_token_for_firebase_session(
         refresh_token: parsed.refreshToken,
         email: parsed.email,
         local_id: parsed.localId,
+        display_name: parsed.displayName,
+        photo_url: parsed.photoUrl,
     })
 }

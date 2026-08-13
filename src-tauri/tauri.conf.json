@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "NexPass",
-  "version": "5.0.1",
+  "version": "6.0.1",
   "identifier": "com.nexapp.nexpass",
   "build": {
     "beforeDevCommand": "npm run dev",

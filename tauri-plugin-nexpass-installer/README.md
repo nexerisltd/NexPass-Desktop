@@ -1,0 +1,1 @@
+# Tauri Plugin nexpass-installer

@@ -2,8 +2,15 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
-src-tauri/.env
-*.jks
-keystore.properties
 .DS_Store
 *.log
+
+# SECRETS — never commit these, on any repo, public or private
+keystore.properties
+*.jks
+*.keystore
+.env
+
+# Build output zips / installers accidentally sitting in the project root
+*.zip
+src-tauri/src/secrets.rs

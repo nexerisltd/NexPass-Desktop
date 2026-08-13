@@ -72,4 +72,3 @@ this automatically per platform — e.g.
 `%APPDATA%/com.nexapp.nexpass/` on Windows). It contains only a salt
 and a verification hash — never the PIN itself, and never the
 encryption key.
-"# NexPass-Desktop" 

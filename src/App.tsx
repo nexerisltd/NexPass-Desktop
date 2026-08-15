@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { invoke, convertFileSrc, addPluginListener } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { authenticate as biometricAuthenticate, checkStatus as biometricCheckStatus } from "@tauri-apps/plugin-biometric";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { save as saveFileDialog, open as openFileDialog } from "@tauri-apps/plugin-dialog";
@@ -517,6 +518,12 @@ const Icon = {
 };
 
 function App() {
+  // Desktop targets (Windows/macOS/Linux) get the wide three-column
+  // layout (sidebar + list + detail pane); Android's system WebView UA
+  // always contains "Android", so this is a reliable, dependency-free
+  // way to tell the two apart without touching the Rust side.
+  const isDesktop = useMemo(() => !/Android/i.test(navigator.userAgent), []);
+
   const [screen, setScreen] = useState<Screen>("loading");
   const [pin, setPin] = useState("");
   const [firstPin, setFirstPin] = useState("");
@@ -554,7 +561,6 @@ function App() {
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
 
   const [entries, setEntries] = useState<EntrySummary[]>([]);
-  const [entriesLoading, setEntriesLoading] = useState(true);
   const [trashEntries, setTrashEntries] = useState<EntrySummary[]>([]);
   const [entriesError, setEntriesError] = useState("");
   const [search, setSearch] = useState("");
@@ -594,8 +600,6 @@ function App() {
   const [deleteEmailInput, setDeleteEmailInput] = useState("");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void; danger?: boolean } | null>(null);
-  const [mobileDataPrompt, setMobileDataPrompt] = useState<{ estimateKb: number; resolve: (approved: boolean) => void } | null>(null);
-  const backPressRef = useRef<number>(0);
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -799,29 +803,8 @@ function App() {
     }
   }
 
-  // Shows the "this will use mobile data" confirmation and resolves once
-  // the person picks Sync Now or Later — used by handleSyncNow below so
-  // both automatic and manual syncs go through the same gate.
-  function askMobileDataPermission(estimateKb: number): Promise<boolean> {
-    return new Promise((resolve) => setMobileDataPrompt({ estimateKb, resolve }));
-  }
-
   async function handleSyncNow(silent = false) {
     if (syncing) return;
-    try {
-      const metered = await invoke<boolean>("is_metered_connection");
-      if (metered) {
-        // Rough estimate only (encrypted entries are small and roughly
-        // uniform in size) — enough to give a sense of scale, not an
-        // exact byte count.
-        const estimateKb = Math.max(5, (syncStatusInfo?.local_dirty ?? 0) * 2 + (syncStatusInfo?.remote_changed ? 15 : 0));
-        const approved = await askMobileDataPermission(estimateKb);
-        if (!approved) return; // "Later" — skip this sync attempt entirely
-      }
-    } catch {
-      // Metered-connection detection isn't available (e.g. desktop) —
-      // proceed as normal, nothing to gate.
-    }
     setSyncing(true);
     setSyncError("");
     try {
@@ -854,11 +837,8 @@ function App() {
 
   function loadAll() {
     setEntriesError("");
-    setEntriesLoading(true);
-    Promise.allSettled([
-      invoke<EntrySummary[]>("list_entries").then(setEntries).catch((e) => setEntriesError(String(e))),
-      invoke<EntrySummary[]>("list_trash").then(setTrashEntries).catch(() => {}),
-    ]).finally(() => setEntriesLoading(false));
+    invoke<EntrySummary[]>("list_entries").then(setEntries).catch((e) => setEntriesError(String(e)));
+    invoke<EntrySummary[]>("list_trash").then(setTrashEntries).catch(() => {});
   }
 
   // Checked once per app-open, throttled to at most once/day (there's no
@@ -1434,12 +1414,66 @@ function App() {
     setScreen("enter-pin");
   }
 
-  // Auto-lock: "Instant" locks immediately the moment the app leaves the
-  // foreground — covers switching tabs/apps, the screen turning off, and
-  // the app being backgrounded/closed. Any other setting starts a timer
-  // that's cancelled if the app comes back to the foreground in time.
+  // Auto-lock.
+  //
+  // Mobile: "Instant" locks the moment the app leaves the foreground —
+  // covers switching apps, the screen turning off, or the app closing.
+  // Any other setting starts a timer when the app is backgrounded, and
+  // cancels it if the app comes back in time. blur/visibilitychange are a
+  // reliable "backgrounded" signal there.
+  //
+  // Desktop: those same events are NOT reliable — a Tauri window's
+  // document commonly stays `visibilityState: "visible"` even while the
+  // OS window has lost focus, and a quick alt-tab away-and-back cancels
+  // the timer via "focus" before it ever gets anywhere. The practical
+  // effect was that auto-lock almost never actually fired on desktop.
+  // So on desktop, "N minutes" instead means N minutes of no mouse/
+  // keyboard activity (the standard behavior for a desktop vault app),
+  // while "Instant" still locks on window blur since that's a meaningful
+  // signal there (switching to another app).
   useEffect(() => {
     if (screen !== "vault") return;
+
+    if (isDesktop) {
+      function resetIdleTimer() {
+        if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
+        if (appSettings.auto_lock_minutes > 0) {
+          lockTimerRef.current = setTimeout(lockNow, appSettings.auto_lock_minutes * 60_000);
+        }
+      }
+      const activityEvents: (keyof WindowEventMap)[] = ["mousemove", "mousedown", "keydown", "wheel", "touchstart"];
+
+      if (appSettings.auto_lock_minutes <= 0) {
+        // Use Tauri's native window-focus event rather than the DOM
+        // "blur"/"visibilitychange" events — inside a WebView2 host those
+        // don't reliably reflect the OS window actually losing focus
+        // (alt-tabbing away, clicking another app), which is why
+        // "Instant" wasn't firing on desktop before.
+        let unlisten: (() => void) | undefined;
+        let cancelled = false;
+        getCurrentWindow()
+          .onFocusChanged(({ payload: focused }) => {
+            if (!focused) lockNow();
+          })
+          .then((fn) => {
+            if (cancelled) fn();
+            else unlisten = fn;
+          })
+          .catch(() => {});
+        return () => {
+          cancelled = true;
+          unlisten?.();
+        };
+      }
+
+      activityEvents.forEach((ev) => window.addEventListener(ev, resetIdleTimer));
+      resetIdleTimer();
+      return () => {
+        activityEvents.forEach((ev) => window.removeEventListener(ev, resetIdleTimer));
+        if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
+      };
+    }
+
     function scheduleLock() {
       if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
       if (appSettings.auto_lock_minutes <= 0) {
@@ -1469,91 +1503,7 @@ function App() {
       window.removeEventListener("pagehide", scheduleLock);
       if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
     };
-  }, [screen, appSettings.auto_lock_minutes]);
-
-  // Regardless of the configured auto-lock delay, the phone's screen
-  // turning off or the device locking should lock NexPass immediately —
-  // not wait out the 5/10/15 min timer. Android doesn't expose that as a
-  // web event, so the installer plugin's native side watches for it and
-  // emits this event (see InstallerPlugin.kt).
-  useEffect(() => {
-    if (screen !== "vault") return;
-    let unregister: (() => void) | undefined;
-    addPluginListener("nexpass-installer", "screen-off", () => {
-      lockNow();
-    })
-      .then((handle) => {
-        unregister = () => handle.unregister();
-      })
-      .catch(() => {
-        // Not on Android (or plugin unavailable) — nothing to listen for.
-      });
-    return () => unregister?.();
-  }, [screen]);
-
-  // Hardware back button: close whatever's open (dialog → detail panel →
-  // settings sub-screen → non-home tab) one level at a time instead of
-  // exiting the app. Only when nothing is left to close does a second
-  // back press within BACK_EXIT_WINDOW_MS actually quit — Android's
-  // system back button maps to browser history navigation, so we keep
-  // re-arming a guard history entry to intercept it here every time.
-  useEffect(() => {
-    window.history.pushState({ nexpassBackGuard: true }, "");
-
-    function closeTopLevel(): boolean {
-      if (confirmDialog) {
-        setConfirmDialog(null);
-        return true;
-      }
-      if (showDeleteConfirm) {
-        setShowDeleteConfirm(false);
-        return true;
-      }
-      if (updateInfo) {
-        dismissUpdate();
-        return true;
-      }
-      if (showRestartPrompt) {
-        setShowRestartPrompt(false);
-        return true;
-      }
-      if (mobileDataPrompt) {
-        mobileDataPrompt.resolve(false);
-        setMobileDataPrompt(null);
-        return true;
-      }
-      if (screen === "vault" && panelMode !== "none") {
-        closePanel();
-        return true;
-      }
-      if (screen === "vault" && mainTab === "settings" && settingsScreen !== "menu") {
-        setSettingsScreen("menu");
-        return true;
-      }
-      if (screen === "vault" && mainTab !== "home") {
-        setMainTab("home");
-        return true;
-      }
-      return false;
-    }
-
-    function onPopState() {
-      const handled = closeTopLevel();
-      window.history.pushState({ nexpassBackGuard: true }, "");
-      if (!handled) {
-        const now = Date.now();
-        if (now - backPressRef.current < BACK_EXIT_WINDOW_MS) {
-          invoke("exit_app").catch(() => {});
-        } else {
-          backPressRef.current = now;
-          showToast("Press back again to exit", "info", BACK_EXIT_WINDOW_MS);
-        }
-      }
-    }
-
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, [screen, panelMode, mainTab, settingsScreen, confirmDialog, showDeleteConfirm, updateInfo, showRestartPrompt, mobileDataPrompt]);
+  }, [screen, appSettings.auto_lock_minutes, isDesktop]);
 
   async function handleLock() {
     await lockNow();
@@ -1698,7 +1648,7 @@ function App() {
   const syncStatusTone = !googleSession ? "muted" : syncing ? "info" : syncStatusInfo?.last_sync_ok === false ? "danger" : syncStatusInfo?.needs_sync ? "warn" : "ok";
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isDesktop ? "is-desktop" : "is-mobile"}`}>
       {(screen === "loading" || screen === "create-pin" || screen === "confirm-pin" || screen === "enter-pin") && (
         <div className="centered-content full-bleed">
           {screen === "loading" && <p className="status-text">Loading…</p>}
@@ -1733,10 +1683,74 @@ function App() {
 
       {screen === "vault" && (
         <div className="mobile-shell">
+          {/* ---------- SIDEBAR (desktop) / renders as bottom island nav on mobile via CSS ---------- */}
+          <aside className="sidebar">
+            <div className="sidebar-brand">
+              <img src={LOGO_SRC} className="brand-logo" alt="" />
+              <span className="brand-name">{APP_NAME}</span>
+            </div>
+            <nav className="sidebar-nav">
+              <button className={mainTab === "home" ? "active" : ""} onClick={() => goTab("home")}>
+                <Icon.home filled={mainTab === "home"} />
+                <span>Home</span>
+              </button>
+              <button className={mainTab === "favorites" ? "active" : ""} onClick={() => goTab("favorites")}>
+                <Icon.star filled={mainTab === "favorites"} />
+                <span>Favorites</span>
+              </button>
+              <button className={mainTab === "categories" ? "active" : ""} onClick={() => goTab("categories")}>
+                <Icon.grid />
+                <span>Categories</span>
+              </button>
+              <button className={mainTab === "settings" ? "active" : ""} onClick={() => goTab("settings")}>
+                <Icon.gear filled={mainTab === "settings"} />
+                <span>Settings</span>
+              </button>
+            </nav>
+            <div className="sidebar-footer">
+              <div className="vault-status-card compact">
+                <span className="shield-icon"><Icon.shield /></span>
+                <div>
+                  <div className="vault-status-label">Vault Status</div>
+                  <div className="vault-status-value">Secure · {entries.length} item{entries.length === 1 ? "" : "s"}</div>
+                </div>
+              </div>
+              <button className="sidebar-profile-btn" onClick={openProfile}>
+                <span className="sidebar-profile-avatar">
+                  {avatarSrc() ? <img src={avatarSrc()!} alt="" /> : <Icon.user />}
+                </span>
+                <span>{profile.name || "Profile"}</span>
+              </button>
+            </div>
+          </aside>
+
+          <div className="main-content">
+            {/* Shared full-width search bar — sits above BOTH the list and
+                detail columns (not the sidebar), matching the wireframe. */}
+            {isDesktop && (mainTab === "home" || mainTab === "favorites") && (
+              <div className="desktop-topbar">
+                <div className="search-bar">
+                  <Icon.search />
+                  <input
+                    placeholder={mainTab === "home" ? "Search credentials…" : "Search favorites…"}
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                  {search && (
+                    <button className="search-clear" onClick={() => setSearch("")} aria-label="Clear search">
+                      <Icon.close />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+          <div className={`workspace${isDesktop && mainTab === "home" ? " has-detail" : ""}`}>
+          <div className="list-column">
           {/* ---------- HOME ---------- */}
-          {mainTab === "home" && !fullPageOpen && (
+          {mainTab === "home" && (!fullPageOpen || isDesktop) && (
             <div className="tab-screen">
-              <div className="brand-header">
+              <div className="brand-header replaced-by-topbar">
                 <img src={LOGO_SRC} className="brand-logo" alt="" />
                 <span className="brand-name">{APP_NAME}</span>
                 <button className="profile-avatar-btn" onClick={openProfile} aria-label="Profile">
@@ -1785,19 +1799,7 @@ function App() {
                     </button>
                   </div>
                 )}
-                {entriesLoading && entries.length === 0 ? (
-                  <ul className="entry-list">
-                    {[0, 1, 2, 3, 4].map((i) => (
-                      <li key={i} className="entry-row skeleton-row">
-                        <div className="skeleton-shimmer skeleton-icon" />
-                        <div className="skeleton-lines">
-                          <div className="skeleton-shimmer skeleton-line skeleton-line-title" />
-                          <div className="skeleton-shimmer skeleton-line skeleton-line-sub" />
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                ) : filteredHome.length === 0 ? (
+                {filteredHome.length === 0 ? (
                   <p className="status-text empty-hint">{search ? "No matches." : "No entries yet — add your first one."}</p>
                 ) : (
                   <ul className="entry-list">{filteredHome.map((e) => renderEntryRow(e, false))}</ul>
@@ -1807,9 +1809,9 @@ function App() {
           )}
 
           {/* ---------- FAVORITES ---------- */}
-          {mainTab === "favorites" && !fullPageOpen && (
+          {mainTab === "favorites" && (!fullPageOpen || isDesktop) && (
             <div className="tab-screen">
-              <div className="brand-header">
+              <div className="brand-header replaced-by-topbar">
                 <img src={LOGO_SRC} className="brand-logo" alt="" />
                 <span className="brand-name">Favorites</span>
               </div>
@@ -1833,7 +1835,7 @@ function App() {
           )}
 
           {/* ---------- CATEGORIES (coming soon) ---------- */}
-          {mainTab === "categories" && !fullPageOpen && (
+          {mainTab === "categories" && (!fullPageOpen || isDesktop) && (
             <div className="tab-screen">
               {!categoryFilter ? (
                 <>
@@ -1877,7 +1879,7 @@ function App() {
           )}
 
           {/* ---------- SETTINGS ---------- */}
-          {mainTab === "settings" && !fullPageOpen && (
+          {mainTab === "settings" && (!fullPageOpen || isDesktop) && (
             <div className="tab-screen">
               {settingsScreen === "menu" && (
                 <>
@@ -2257,7 +2259,7 @@ function App() {
                       <div className="settings-row">
                         <div>
                           <div className="settings-row-title">Current version</div>
-                          <div className="settings-row-sub">v{APP_VERSION}</div>
+                          <div className="settings-row-sub">V.{APP_VERSION}</div>
                         </div>
                       </div>
                       <div className="settings-row">
@@ -2350,7 +2352,7 @@ function App() {
                     <div className="about-logo-block">
                       <img src={LOGO_SRC} alt="" className="about-logo" />
                       <div className="about-app-name">{APP_NAME}</div>
-                      <div className="about-app-version">v{APP_VERSION}</div>
+                      <div className="about-app-version">V.{APP_VERSION}</div>
                     </div>
                     <div className="settings-section">
                       <div className="settings-row">
@@ -2359,7 +2361,7 @@ function App() {
                       </div>
                       <div className="settings-row">
                         <div><div className="settings-row-title">Version</div></div>
-                        <span>v{APP_VERSION}</span>
+                        <span>V.{APP_VERSION}</span>
                       </div>
                       <div className="settings-row">
                         <div><div className="settings-row-title">App ID</div></div>
@@ -2379,10 +2381,11 @@ function App() {
               )}
             </div>
           )}
+          </div>{/* /list-column */}
 
-          {/* ---------- FULL-PAGE CREDENTIAL VIEW ---------- */}
+          {/* ---------- CREDENTIAL DETAIL (right pane on desktop, full-page on mobile) ---------- */}
           {panelMode === "view" && selectedEntry && (
-            <div className="fullpage">
+            <div className={`fullpage view-pane${isDesktop && mainTab === "home" ? " embedded" : ""}`}>
               <div className="screen-header">
                 <button className="icon-btn back-btn" onClick={closePanel}><Icon.back /></button>
                 <h2 className="truncate">{selectedEntry.title}</h2>
@@ -2525,6 +2528,18 @@ function App() {
               </div>
             </div>
           )}
+
+          {/* ---------- Desktop-only placeholder when nothing is selected (Home tab only — other tabs don't reserve detail space) ---------- */}
+          {isDesktop && mainTab === "home" && !(panelMode === "view" && selectedEntry) && (
+            <aside className="view-pane detail-empty-pane">
+              <div className="detail-empty">
+                <Icon.lock />
+                <p>Select an item to view its details</p>
+              </div>
+            </aside>
+          )}
+          </div>{/* /workspace */}
+          </div>{/* /main-content */}
 
           {/* ---------- FULL-PAGE ADD / EDIT ---------- */}
           {panelMode === "pick-category" && (
@@ -2696,8 +2711,8 @@ function App() {
             </div>
           )}
 
-          {/* ---------- FLOATING BOTTOM ISLAND NAV ---------- */}
-          {!fullPageOpen && (
+          {/* ---------- FLOATING BOTTOM ISLAND NAV (mobile only — desktop uses the sidebar) ---------- */}
+          {!isDesktop && !fullPageOpen && (
             <nav className="island-nav">
               <button className={mainTab === "home" ? "active" : ""} onClick={() => goTab("home")}>
                 <Icon.home filled={mainTab === "home"} />
@@ -2833,20 +2848,6 @@ function App() {
               <button className="settings-btn primary" onClick={handleRestartApp} disabled={restartBusy}>
                 {restartBusy ? "Restarting…" : "Restart App"}
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {mobileDataPrompt && (
-        <div className="confirm-overlay" onClick={() => { mobileDataPrompt.resolve(false); setMobileDataPrompt(null); }}>
-          <div className="confirm-box" onClick={(e) => e.stopPropagation()}>
-            <p>
-              You're on mobile data. Syncing now will use approximately {mobileDataPrompt.estimateKb} KB. Sync now, or wait for Wi‑Fi?
-            </p>
-            <div className="settings-btn-group">
-              <button className="settings-btn" onClick={() => { mobileDataPrompt.resolve(false); setMobileDataPrompt(null); }}>Later</button>
-              <button className="settings-btn primary" onClick={() => { mobileDataPrompt.resolve(true); setMobileDataPrompt(null); }}>Sync Now</button>
             </div>
           </div>
         </div>

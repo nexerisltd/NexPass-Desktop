@@ -28,6 +28,17 @@ body {
 }
 input, textarea, select, button { font-family: inherit; }
 
+/* Themed scrollbars — the OS/webview default (light, thick) stood out
+   badly against the dark UI and read as a stray, mismatched panel. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
+
 .app-shell {
   display: flex;
   flex-direction: column;
@@ -38,10 +49,10 @@ input, textarea, select, button { font-family: inherit; }
     radial-gradient(1200px 600px at 20% -10%, rgba(59,130,246,0.14), transparent 60%),
     radial-gradient(1000px 500px at 100% 0%, rgba(139,92,246,0.12), transparent 55%),
     var(--bg-solid);
-  max-width: 560px;
-  margin: 0 auto;
   position: relative;
 }
+/* Mobile keeps the old phone-width column; desktop uses the full window. */
+.app-shell.is-mobile { max-width: 560px; margin: 0 auto; }
 
 .centered-content { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; overflow-y: auto; }
 .status-text { color: var(--text-dim); font-size: 0.85rem; text-align: center; }
@@ -90,6 +101,137 @@ input, textarea, select, button { font-family: inherit; }
   position: relative;
   overflow: hidden;
   padding-top: var(--safe-top);
+}
+
+/* ---------- Desktop shell: sidebar + list + detail pane ---------- */
+
+.is-desktop .mobile-shell { flex-direction: row; padding-top: 0; }
+
+.sidebar { display: none; }
+.is-desktop .sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 232px;
+  flex-shrink: 0;
+  padding: 20px 14px;
+  gap: 22px;
+  border-right: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.02);
+}
+.sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 0 6px; }
+.sidebar-brand .brand-logo { width: 30px; height: 30px; border-radius: 9px; }
+.sidebar-brand .brand-name { font-size: 1.08rem; font-weight: 700; letter-spacing: -0.01em; }
+
+.sidebar-nav { display: flex; flex-direction: column; gap: 4px; }
+.sidebar-nav button {
+  display: flex; align-items: center; gap: 12px;
+  padding: 11px 12px; border-radius: 12px; border: none; background: none;
+  color: var(--text-dim); font-size: 0.92rem; font-weight: 600; cursor: pointer;
+  text-align: left; transition: background 0.15s, color 0.15s;
+}
+.sidebar-nav button:hover { background: var(--glass-bg); color: var(--text); }
+.sidebar-nav button.active { color: var(--text); background: var(--glass-bg-strong); }
+.sidebar-nav button.active svg { color: var(--accent1); }
+
+.sidebar-footer { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }
+.vault-status-card.compact { margin: 0; padding: 12px; }
+.sidebar-profile-btn {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px; border-radius: 12px; border: 1px solid var(--glass-border);
+  background: var(--glass-bg); color: var(--text); font-size: 0.85rem; font-weight: 600;
+  cursor: pointer; text-align: left; overflow: hidden;
+}
+.sidebar-profile-btn span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-profile-avatar {
+  width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.08); color: var(--text-dim);
+}
+.sidebar-profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+.workspace { display: contents; }
+.is-desktop .workspace {
+  display: grid;
+  grid-template-columns: 1fr;
+  flex: 1;
+  min-height: 0;
+}
+/* Only the Home tab actually shows a credential's detail — Favorites,
+   Categories, and Settings have nothing to put there, so they stay a
+   single full-width column instead of reserving empty space. */
+.is-desktop .workspace.has-detail {
+  grid-template-columns: minmax(380px, 1fr) 460px;
+}
+
+.main-content { display: contents; }
+.is-desktop .main-content { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+
+.desktop-topbar { flex-shrink: 0; padding: 16px 16px 0; }
+.desktop-topbar .search-bar { margin: 0; }
+
+/* Sidebar carries the brand now; the shared top search bar replaces the
+   per-tab search — but that's only true for Home/Favorites (the ones
+   that render the shared search bar above). Categories/Settings keep
+   their own in-column title since they have nothing to replace it. */
+.is-desktop .list-column .tab-screen > .brand-header.replaced-by-topbar { display: none; }
+.is-desktop .list-column .tab-screen > .search-bar { display: none; }
+.is-desktop .list-column .tab-screen > .toolbar-row { margin-top: 16px; }
+.is-desktop .list-column .tab-screen > .brand-header:not(.replaced-by-topbar) { padding-top: 22px; }
+.is-desktop .list-column .tab-screen > .brand-header:not(.replaced-by-topbar) .brand-logo { display: none; }
+
+.list-column { display: contents; }
+.is-desktop .list-column {
+  display: flex; flex-direction: column; overflow: hidden;
+  border-right: 1px solid var(--glass-border);
+  background: transparent;
+}
+
+.is-desktop .fullpage.view-pane.embedded {
+  position: relative;
+  flex-shrink: 0;
+  background: transparent;
+  animation: fade-in 0.18s ease;
+}
+/* Row 2: the detail pane's back/star/edit/delete row lines up with the
+   list's "Recent / lock / New Item" toolbar since both are now the first
+   thing in their column, directly under the shared search bar — no title
+   here (the item name already shows in the content below, next to its
+   icon), just the actions. Only applies when the pane is embedded next
+   to the list (Home tab); opened from elsewhere it's a normal modal. */
+.is-desktop .view-pane.embedded .screen-header {
+  margin: 12px 16px 4px;
+  padding: 0;
+  border-bottom: none;
+}
+.is-desktop .view-pane.embedded .screen-header h2 { display: none; }
+.detail-empty-pane { display: flex; background: transparent; }
+.detail-empty {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; color: var(--text-faint); text-align: center; padding: 32px;
+}
+.detail-empty p { margin: 0; font-size: 0.88rem; }
+
+/* Non-detail full-page panels (add/edit/pick-category/profile) still
+   cover the whole app on desktop — same as mobile — instead of a small
+   floating dialog, since a shrunk centered card read as an accidental
+   popup rather than a real screen of the app. */
+.is-desktop .fullpage:not(.embedded) {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-solid);
+}
+.is-desktop .fullpage:not(.embedded) .list-scroll {
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+}
+.is-desktop .fullpage:not(.embedded) .screen-header {
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
 }
 
 .tab-screen, .fullpage {
@@ -196,6 +338,7 @@ input, textarea, select, button { font-family: inherit; }
   padding: 12px 12px calc(96px + var(--safe-bottom));
 }
 .fullpage .list-scroll { padding-bottom: calc(24px + var(--safe-bottom)); }
+.is-desktop .list-scroll { padding-bottom: 16px; }
 
 .entry-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 

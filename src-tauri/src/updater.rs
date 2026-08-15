@@ -22,13 +22,29 @@ use tauri::{AppHandle, Emitter, Manager};
 const CURRENT_VERSION: &str = "6.0.1";
 const HTTP_TIMEOUT_SECS: u64 = 15;
 
-// Replace with wherever you end up hosting update.json (a GitHub raw
-// file, Firebase Storage, Vercel, etc. all work — it just needs to be a
-// plain public URL that returns the JSON below).
+// Android and desktop ship from the same NexPass-Update repo but read
+// different manifest files, since the two builds have separate release
+// cadences and installer formats (.apk vs the NSIS .exe). Everything
+// below this — download, progress events, install hand-off — is shared
+// code; only these constants branch per platform.
+#[cfg(target_os = "android")]
 const MANIFEST_URL: &str = "https://raw.githubusercontent.com/nexerisltd/NexPass-Update/main/update.json";
+#[cfg(target_os = "android")]
+const RELEASES_URL: &str = "https://raw.githubusercontent.com/nexerisltd/NexPass-Update/main/releases.json";
+#[cfg(target_os = "android")]
+const UPDATE_FILENAME: &str = "nexpass-update.apk";
 
-const APK_FILENAME: &str = "nexpass-update.apk";
-const APK_META_FILENAME: &str = "nexpass-update.meta.json";
+// Desktop currently only ships a Windows build (see tauri.conf.json's
+// nsis bundle target) — if macOS/Linux builds are added later, branch
+// this further with their own -mac.json / -linux.json manifests.
+#[cfg(not(target_os = "android"))]
+const MANIFEST_URL: &str = "https://raw.githubusercontent.com/nexerisltd/NexPass-Update/main/update-win.json";
+#[cfg(not(target_os = "android"))]
+const RELEASES_URL: &str = "https://raw.githubusercontent.com/nexerisltd/NexPass-Update/main/release-win.json";
+#[cfg(not(target_os = "android"))]
+const UPDATE_FILENAME: &str = "nexpass-update.exe";
+
+const UPDATE_META_FILENAME: &str = "nexpass-update.meta.json";
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct UpdateManifest {
@@ -72,10 +88,6 @@ pub struct ReleaseNote {
     pub date: String,
     pub notes: String,
 }
-
-// Same hosting note as MANIFEST_URL above — replace with your actual
-// releases.json URL once it's hosted.
-const RELEASES_URL: &str = "https://raw.githubusercontent.com/nexerisltd/NexPass-Update/main/releases.json";
 
 pub fn fetch_release_notes() -> Result<Vec<ReleaseNote>, String> {
     let client = http_client()?;
@@ -143,12 +155,12 @@ fn updates_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn apk_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(updates_dir(app)?.join(APK_FILENAME))
+fn update_file_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(updates_dir(app)?.join(UPDATE_FILENAME))
 }
 
 fn meta_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(updates_dir(app)?.join(APK_META_FILENAME))
+    Ok(updates_dir(app)?.join(UPDATE_META_FILENAME))
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -163,29 +175,29 @@ pub struct DownloadedUpdateInfo {
 /// a previous download — lets the frontend restore the Install/Delete
 /// buttons after an app restart without re-downloading anything.
 pub fn get_downloaded_update_info(app: &AppHandle) -> Result<Option<DownloadedUpdateInfo>, String> {
-    let apk_p = apk_path(app)?;
+    let update_p = update_file_path(app)?;
     let meta_p = meta_path(app)?;
-    if !apk_p.exists() || !meta_p.exists() {
+    if !update_p.exists() || !meta_p.exists() {
         return Ok(None);
     }
     let raw = std::fs::read_to_string(&meta_p).map_err(|e| e.to_string())?;
     let mut info: DownloadedUpdateInfo = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     // Keep the reported size honest even if the meta file is stale.
-    if let Ok(md) = std::fs::metadata(&apk_p) {
+    if let Ok(md) = std::fs::metadata(&update_p) {
         info.size_bytes = md.len();
     }
-    info.path = apk_p.to_string_lossy().to_string();
+    info.path = update_p.to_string_lossy().to_string();
     Ok(Some(info))
 }
 
 /// Deletes the downloaded update APK (and its sidecar metadata) to free
 /// up storage. Returns true if a file was actually removed.
 pub fn delete_downloaded_update(app: &AppHandle) -> Result<bool, String> {
-    let apk_p = apk_path(app)?;
+    let update_p = update_file_path(app)?;
     let meta_p = meta_path(app)?;
-    let existed = apk_p.exists();
+    let existed = update_p.exists();
     if existed {
-        std::fs::remove_file(&apk_p).map_err(|e| e.to_string())?;
+        std::fs::remove_file(&update_p).map_err(|e| e.to_string())?;
     }
     if meta_p.exists() {
         let _ = std::fs::remove_file(&meta_p);
@@ -213,8 +225,8 @@ fn download_update_inner(app: &AppHandle, url: &str, version: &str) -> Result<St
     let mut response = client.get(url).send().map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?;
     let total = response.content_length().unwrap_or(0);
 
-    let apk_p = apk_path(app)?;
-    let mut file = std::fs::File::create(&apk_p).map_err(|e| e.to_string())?;
+    let update_p = update_file_path(app)?;
+    let mut file = std::fs::File::create(&update_p).map_err(|e| e.to_string())?;
 
     let mut downloaded: u64 = 0;
     let mut buf = [0u8; 64 * 1024];
@@ -239,10 +251,10 @@ fn download_update_inner(app: &AppHandle, url: &str, version: &str) -> Result<St
         version: version.to_string(),
         size_bytes: downloaded,
         downloaded_at,
-        path: apk_p.to_string_lossy().to_string(),
+        path: update_p.to_string_lossy().to_string(),
     };
     std::fs::write(meta_path(app)?, serde_json::to_string(&info).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
 
     emit_download_progress(app, downloaded, total, "done", "Download complete");
-    Ok(apk_p.to_string_lossy().to_string())
+    Ok(update_p.to_string_lossy().to_string())
 }

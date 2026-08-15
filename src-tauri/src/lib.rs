@@ -614,13 +614,43 @@ fn save_profile(app: AppHandle, name: Option<String>, bio: Option<String>) -> Re
 #[tauri::command]
 fn set_profile_avatar(app: AppHandle, path: String) -> Result<(), String> {
     let mut p = profile_store::load(&app);
-    p.avatar_path = Some(path);
+
+    // Desktop lets the user pick a file from anywhere on disk via the
+    // native file dialog. Rather than widening the asset-protocol scope
+    // to the whole filesystem just so the picked photo can be displayed,
+    // copy it into NexPass's own app-data folder (which already has a
+    // narrow, dedicated scope in tauri.conf.json) and point the profile
+    // at that stable copy instead.
+    #[cfg(desktop)]
+    {
+        let src = std::path::Path::new(&path);
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png");
+        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        // Clean up a previous avatar saved under a different extension.
+        for old_ext in ["png", "jpg", "jpeg", "webp"] {
+            let _ = std::fs::remove_file(dir.join(format!("avatar.{old_ext}")));
+        }
+        let dest = dir.join(format!("avatar.{ext}"));
+        std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+        p.avatar_path = Some(dest.to_string_lossy().to_string());
+    }
+
+    #[cfg(not(desktop))]
+    {
+        p.avatar_path = Some(path);
+    }
+
     profile_store::save(&app, &p)
 }
 
 #[tauri::command]
 fn clear_profile_avatar(app: AppHandle) -> Result<(), String> {
     let mut p = profile_store::load(&app);
+    #[cfg(desktop)]
+    if let Some(old) = &p.avatar_path {
+        let _ = std::fs::remove_file(old);
+    }
     p.avatar_path = None;
     profile_store::save(&app, &p)
 }

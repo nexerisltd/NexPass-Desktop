@@ -307,6 +307,18 @@
           "markdownDescription": "Denies the install_apk command without any pre-configured scope."
         },
         {
+          "description": "Enables the is_metered_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-is-metered-connection",
+          "markdownDescription": "Enables the is_metered_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the is_metered_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-is-metered-connection",
+          "markdownDescription": "Denies the is_metered_connection command without any pre-configured scope."
+        },
+        {
           "description": "Default permissions for the nexpass-installer plugin\n#### This default permission set includes:\n\n- `allow-install-apk`",
           "type": "string",
           "const": "default",

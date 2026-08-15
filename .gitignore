@@ -14,3 +14,6 @@ keystore.properties
 # Build output zips / installers accidentally sitting in the project root
 *.zip
 src-tauri/src/secrets.rs
+lib/
+pubspec.yaml
+*.iss

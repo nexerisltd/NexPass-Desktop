@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "mobile-capability",
+  "description": "Mobile-only permissions for NexPass's main window",
+  "windows": ["main"],
+  "platforms": ["iOS", "android"],
+  "permissions": ["biometric:allow-authenticate", "biometric:allow-status"]
+}

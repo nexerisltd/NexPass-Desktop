@@ -1,0 +1,67 @@
+[package]
+name = "nexpass"
+version = "6.0.1"
+description = "NexPass — secure local credential vault"
+authors = ["Arabi Islam, MR. ARX <NexApp>"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-process = "2"
+tauri-plugin-nexpass-installer = { path = "../tauri-plugin-nexpass-installer" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Crypto layer — used by crypto.rs (key derivation + encrypt/decrypt)
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+
+# Google Sign-In (system browser + loopback redirect) + Firebase Auth REST calls.
+# rustls-tls (not the default native-tls) because native-tls needs OpenSSL
+# cross-compiled for the Android NDK target, which is a common source of
+# Android build failures; rustls is pure Rust and cross-compiles cleanly.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+urlencoding = "2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Tray icon + window vibrancy have no Android/iOS equivalent — only
+# pulled in (and only compiled) for desktop targets.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+window-vibrancy = "0.5"
+tauri = { version = "2", features = ["tray-icon"] }
+# Official Tauri updater — desktop only. Downloads + verifies (Ed25519
+# signature) + silently applies updates, then the app relaunches itself.
+# Android keeps its own manifest+APK flow (updater.rs) since Play-Store-
+# style silent self-replacement isn't something a sideloaded app is
+# allowed to do there.
+tauri-plugin-updater = "2"
+
+# Biometric unlock (fingerprint / face) — Android + iOS only, no desktop equivalent.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+tauri-plugin-biometric = "2"
+
+[lib]
+name = "nexpass_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "nexpass"
+path = "src/main.rs"
+
+# Release build tuning — smaller binary, faster startup.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -17,3 +17,9 @@ src-tauri/src/secrets.rs
 lib/
 pubspec.yaml
 *.iss
+signing-key/
+*.key
+*.key.pub
+echo signing-key/ >> .gitignore
+echo *.key >> .gitignore
+echo *.key.pub >> .gitignore

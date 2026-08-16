@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { check as checkDesktopUpdate, type Update as DesktopUpdate } from "@tauri-apps/plugin-updater";
 import { authenticate as biometricAuthenticate, checkStatus as biometricCheckStatus } from "@tauri-apps/plugin-biometric";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { save as saveFileDialog, open as openFileDialog } from "@tauri-apps/plugin-dialog";
@@ -601,6 +602,10 @@ function App() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void; danger?: boolean } | null>(null);
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Holds the live Update handle from the official Tauri updater plugin
+  // between "check" and "download"/"install" (desktop only — Android
+  // keeps using the plain invoke()/updater.rs manifest flow below).
+  const desktopUpdateRef = useRef<DesktopUpdate | null>(null);
 
   useEffect(() => {
     invoke<boolean>("vault_exists")
@@ -855,6 +860,37 @@ function App() {
       if (Date.now() - lastCheck < intervalMs) return;
     }
     localStorage.setItem(UPDATE_CHECK_KEY, String(Date.now()));
+
+    // Desktop: the official, signed updater — separate manifest
+    // (update-win-v2.json) and a completely different verify/download/
+    // install path from Android's below, but the same on-screen flow
+    // (banner → Download → Install → restart prompt) so the UI code
+    // doesn't need to know which one is running underneath.
+    if (isDesktop) {
+      try {
+        const update = await checkDesktopUpdate();
+        if (!update) {
+          desktopUpdateRef.current = null;
+          if (force) showToast("You're on the latest version", "success");
+          return;
+        }
+        const dismissed = localStorage.getItem(UPDATE_DISMISS_KEY);
+        if (dismissed === update.version && !force) return;
+        desktopUpdateRef.current = update;
+        setUpdateInfo({
+          current_version: APP_VERSION,
+          version: update.version,
+          changelog: update.body || "",
+          download_url: "",
+        });
+        setUpdateStage("idle");
+        setDownloadProgress(null);
+      } catch (e) {
+        if (force) showToast(friendlyError(String(e)), "error", 4000);
+      }
+      return;
+    }
+
     try {
       const info = await invoke<UpdateInfo | null>("check_for_update");
       if (!info) {
@@ -915,6 +951,44 @@ function App() {
     setUpdateBusy(true);
     setUpdateStage("downloading");
     setDownloadProgress(null);
+
+    if (isDesktop) {
+      const update = desktopUpdateRef.current;
+      if (!update) {
+        setUpdateBusy(false);
+        setUpdateStage("idle");
+        return;
+      }
+      try {
+        let total = 0;
+        let downloaded = 0;
+        await update.download((event) => {
+          if (event.event === "Started") {
+            total = event.data.contentLength ?? 0;
+            setDownloadProgress({ downloaded: 0, total, phase: "downloading", message: "Starting download…" });
+          } else if (event.event === "Progress") {
+            downloaded += event.data.chunkLength;
+            setDownloadProgress({ downloaded, total, phase: "downloading", message: "Downloading update…" });
+          } else if (event.event === "Finished") {
+            setDownloadProgress({ downloaded: downloaded || total, total, phase: "done", message: "Download complete" });
+          }
+        });
+        setDownloadedApk({
+          version: update.version,
+          size_bytes: total,
+          downloaded_at: Math.floor(Date.now() / 1000),
+          path: "",
+        });
+        setUpdateStage("downloaded");
+      } catch (e) {
+        showToast(friendlyError(String(e)), "error", 4000);
+        setUpdateStage("idle");
+      } finally {
+        setUpdateBusy(false);
+      }
+      return;
+    }
+
     try {
       await invoke<string>("download_update", { url: updateInfo.download_url, version: updateInfo.version });
       const info = await invoke<DownloadedUpdateInfo | null>("get_downloaded_update_info");
@@ -939,6 +1013,25 @@ function App() {
     if (!downloadedApk) return;
     setInstallBusy(true);
     setUpdateStage("installing");
+
+    if (isDesktop) {
+      const update = desktopUpdateRef.current;
+      try {
+        localStorage.setItem(UPDATE_APPLIED_KEY, JSON.stringify({ version: downloadedApk.version, appliedAt: Date.now() }));
+        // Already downloaded (see handleDownloadUpdate) — this silently
+        // applies it, no separate installer window. Then we relaunch
+        // ourselves instead of asking the person to find NexPass again.
+        if (update) await update.install();
+        setUpdateInfo(null);
+        await relaunch();
+      } catch (e) {
+        showToast(friendlyError(String(e)), "error", 4000);
+      } finally {
+        setInstallBusy(false);
+      }
+      return;
+    }
+
     try {
       localStorage.setItem(UPDATE_APPLIED_KEY, JSON.stringify({ version: downloadedApk.version, appliedAt: Date.now() }));
       await invoke("install_update_apk", { path: downloadedApk.path });
@@ -2324,16 +2417,25 @@ function App() {
                       {downloadedApk && (
                         <div className="settings-row column">
                           <div className="settings-row-title">Downloaded update — v{downloadedApk.version}</div>
-                          <div className="settings-row-sub">{formatBytes(downloadedApk.size_bytes)} on this device, not encrypted</div>
+                          <div className="settings-row-sub">
+                            {isDesktop
+                              ? "Verified and ready — installing will restart NexPass"
+                              : `${formatBytes(downloadedApk.size_bytes)} on this device, not encrypted`}
+                          </div>
                           <div className="settings-btn-group">
                             {updateStage !== "downloading" && (
                               <button className="settings-btn primary" onClick={handleInstallDownloadedApk} disabled={installBusy}>
-                                {installBusy ? "Opening installer…" : "Install Now"}
+                                {installBusy ? (isDesktop ? "Installing…" : "Opening installer…") : "Install Now"}
                               </button>
                             )}
-                            <button className="settings-btn danger" onClick={handleDeleteDownloadedApk} disabled={deleteApkBusy}>
-                              {deleteApkBusy ? "Deleting…" : "Delete APK File"}
-                            </button>
+                            {/* Desktop's download is a signed temp artifact the
+                                updater plugin manages itself — nothing persistent
+                                for the person to clean up, unlike Android's APK. */}
+                            {!isDesktop && (
+                              <button className="settings-btn danger" onClick={handleDeleteDownloadedApk} disabled={deleteApkBusy}>
+                                {deleteApkBusy ? "Deleting…" : "Delete APK File"}
+                              </button>
+                            )}
                           </div>
                         </div>
                       )}

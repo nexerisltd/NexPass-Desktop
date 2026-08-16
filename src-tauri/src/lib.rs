@@ -45,6 +45,13 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_biometric::init());
     }
 
+    // Official signed, silent updater — desktop only (see the Cargo.toml
+    // note above for why Android doesn't get this).
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+
     builder
         .setup(|app| {
             // Tray icons don't exist on Android/iOS — this whole block

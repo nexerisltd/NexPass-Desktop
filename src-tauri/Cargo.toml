@@ -39,6 +39,12 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 window-vibrancy = "0.5"
 tauri = { version = "2", features = ["tray-icon"] }
+# Official Tauri updater — desktop only. Downloads + verifies (Ed25519
+# signature) + silently applies updates, then the app relaunches itself.
+# Android keeps its own manifest+APK flow (updater.rs) since Play-Store-
+# style silent self-replacement isn't something a sideloaded app is
+# allowed to do there.
+tauri-plugin-updater = "2"
 
 # Biometric unlock (fingerprint / face) — Android + iOS only, no desktop equivalent.
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
